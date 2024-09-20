@@ -94,7 +94,6 @@ async def process_chat(message: str, thread_id: str = None, assistant_type: str 
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid assistant type")
 
-        print("Assistant ID:", assistant_id)
         # Run the assistant
         async with API_SEMAPHORE:
             run = await client.beta.threads.runs.create(
