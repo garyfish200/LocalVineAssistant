@@ -1,9 +1,9 @@
 from fastapi import FastAPI, HTTPException, Header
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 import json
-from openai import OpenAI
+from openai import AsyncOpenAI
 import os
 from dotenv import load_dotenv
 import asyncio
@@ -14,13 +14,16 @@ load_dotenv()
 app = FastAPI()
 
 # Initialize the OpenAI client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Get the assistant IDs from environment variables
 ASSISTANT_ID_JOHNS_CREEK = os.getenv("ASSISTANT_ID_JOHNS_CREEK")
 ASSISTANT_ID_ATLANTA = os.getenv("ASSISTANT_ID_ATLANTA")
 
-def get_assistant_id(assistant_type: str):
+# Semaphore to limit concurrent API calls
+API_SEMAPHORE = asyncio.Semaphore(1000)  # Adjust this number based on your API rate limits
+
+async def get_assistant_id(assistant_type: str):
     if assistant_type == "johns_creek":
         return ASSISTANT_ID_JOHNS_CREEK
     elif assistant_type == "atlanta":
@@ -38,13 +41,15 @@ class ThreadMessage(BaseModel):
 async def stream_response(thread_id: str, run_id: str):
     full_response = ""
     while True:
-        run = client.beta.threads.runs.retrieve(
-            thread_id=thread_id,
-            run_id=run_id
-        )
+        async with API_SEMAPHORE:
+            run = await client.beta.threads.runs.retrieve(
+                thread_id=thread_id,
+                run_id=run_id
+            )
         if run.status == "completed":
-            messages = client.beta.threads.messages.list(thread_id=thread_id)
-            assistant_messages = [msg for msg in messages if msg.role == "assistant"]
+            async with API_SEMAPHORE:
+                messages = await client.beta.threads.messages.list(thread_id=thread_id)
+            assistant_messages = [msg for msg in messages.data if msg.role == "assistant"]
             if assistant_messages:
                 latest_message = assistant_messages[0]
                 if latest_message.content:
@@ -70,29 +75,33 @@ async def process_chat(message: str, thread_id: str = None, assistant_type: str 
     try:
         if thread_id is None:
             # Create a new thread
-            thread = client.beta.threads.create()
-            thread_id = thread.id
+            async with API_SEMAPHORE:
+                thread = await client.beta.threads.create()
+                thread_id = thread.id
         
         # Add the user's message to the thread
-        client.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=message
-        )
+        async with API_SEMAPHORE:
+            await client.beta.threads.messages.create(
+                thread_id=thread_id,
+                role="user",
+                content=message
+            )
 
         print("Assistant type:", assistant_type)
         # Get the appropriate assistant ID
         try:
-            assistant_id = get_assistant_id(assistant_type)
+            assistant_id = await get_assistant_id(assistant_type)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid assistant type")
 
+        print("Assistant ID:", assistant_id)
         # Run the assistant
-        run = client.beta.threads.runs.create(
-            thread_id=thread_id,
-            assistant_id=assistant_id,
-            tool_choice={"type": "file_search"}
-        )
+        async with API_SEMAPHORE:
+            run = await client.beta.threads.runs.create(
+                thread_id=thread_id,
+                assistant_id=assistant_id,
+                tool_choice={"type": "file_search"}
+            )
 
         response = await stream_response(thread_id, run.id)
         return JSONResponse(content=json.loads(response))
