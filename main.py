@@ -1,6 +1,7 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
+from typing import Optional
 import json
 from openai import OpenAI
 import os
@@ -15,8 +16,17 @@ app = FastAPI()
 # Initialize the OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Get the assistant ID from environment variables
-ASSISTANT_ID = os.getenv("ASSISTANT_ID")
+# Get the assistant IDs from environment variables
+ASSISTANT_ID_JOHNS_CREEK = os.getenv("ASSISTANT_ID_JOHNS_CREEK")
+ASSISTANT_ID_ATLANTA = os.getenv("ASSISTANT_ID_ATLANTA")
+
+def get_assistant_id(assistant_type: str):
+    if assistant_type == "johns_creek":
+        return ASSISTANT_ID_JOHNS_CREEK
+    elif assistant_type == "atlanta":
+        return ASSISTANT_ID_ATLANTA
+    else:
+        raise ValueError("Invalid assistant type")
 
 class UserMessage(BaseModel):
     message: str
@@ -49,14 +59,14 @@ async def stream_response(thread_id: str, run_id: str):
     return json.dumps({"message": full_response, "thread_id": thread_id})
 
 @app.post("/chat")
-async def chat_with_assistant(user_message: UserMessage):
-    return await process_chat(user_message.message)
+async def chat_with_assistant(user_message: UserMessage, x_assistant_type: Optional[str] = Header(None)):
+    return await process_chat(user_message.message, assistant_type=x_assistant_type)
 
 @app.post("/chat_existing_thread")
-async def chat_with_existing_thread(thread_message: ThreadMessage):
-    return await process_chat(thread_message.message, thread_message.thread_id)
+async def chat_with_existing_thread(thread_message: ThreadMessage, x_assistant_type: Optional[str] = Header(None)):
+    return await process_chat(thread_message.message, thread_message.thread_id, assistant_type=x_assistant_type)
 
-async def process_chat(message: str, thread_id: str = None):
+async def process_chat(message: str, thread_id: str = None, assistant_type: str = None):
     try:
         if thread_id is None:
             # Create a new thread
@@ -70,10 +80,19 @@ async def process_chat(message: str, thread_id: str = None):
             content=message
         )
 
+        print("Assistant type:", assistant_type)
+        # Get the appropriate assistant ID
+        try:
+            assistant_id = get_assistant_id(assistant_type)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid assistant type")
+
+        print("Assistant ID:", assistant_id)
         # Run the assistant
         run = client.beta.threads.runs.create(
             thread_id=thread_id,
-            assistant_id=ASSISTANT_ID
+            assistant_id=assistant_id,
+            tool_choice={"type": "file_search"}
         )
 
         response = await stream_response(thread_id, run.id)
